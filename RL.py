@@ -185,14 +185,20 @@ class Rocket:
 
     def cast_rays(self, asteroids, target):
         """
-        Casts rays from the rocket to detect objects.
-        Returns a list of tuples: (normalized_distance, object_type_id)
-        Also stores visual info for drawing.
+        Casts rays from the rocket to detect objects, accounting for screen wrap-around.
         """
         self.raycast_results_for_drawing.clear()
         ray_outputs = []
 
-        start_angle = self.angle + 90 - FOV / 2
+        # --- NEW: Define offsets for the 8 ghost worlds around the main one ---
+        world_offsets = [
+            (0, 0),  # The real world
+            (SCREEN_WIDTH, 0), (SCREEN_WIDTH, SCREEN_HEIGHT), (0, SCREEN_HEIGHT),
+            (-SCREEN_WIDTH, SCREEN_HEIGHT), (-SCREEN_WIDTH, 0), (-SCREEN_WIDTH, -SCREEN_HEIGHT),
+            (0, -SCREEN_HEIGHT), (SCREEN_WIDTH, -SCREEN_HEIGHT)
+        ]
+
+        start_angle = self.angle - FOV / 2
 
         for i in range(RAY_COUNT):
             ray_angle_deg = start_angle + i * FOV / (RAY_COUNT - 1)
@@ -203,31 +209,36 @@ class Rocket:
             hit_type = TYPE_EMPTY
             hit_color = WHITE
 
-            # Check all potential collidable objects
             collidables = [(a.pos, a.radius, TYPE_ASTEROID, RED) for a in asteroids]
             collidables.append((target.pos, target.radius, TYPE_TARGET, GREEN))
 
+            # --- MODIFIED COLLISION CHECK ---
             for c_pos, c_radius, c_type, c_color in collidables:
-                # Simple line-circle intersection check by stepping along the ray
-                for step in range(0, int(RAY_LENGTH), 5):
-                    point_on_ray = self.pos + ray_dir * step
-                    if point_on_ray.distance_to(c_pos) < c_radius:
-                        if step < closest_hit_dist:
-                            closest_hit_dist = step
-                            hit_type = c_type
-                            hit_color = c_color
-                        break # Found hit for this object
-
-            # For the observation vector
+                # Check the object in the real world and all 8 ghost worlds
+                for offset_x, offset_y in world_offsets:
+                    ghost_pos = c_pos + pygame.math.Vector2(offset_x, offset_y)
+                    
+                    # Simple line-circle intersection check
+                    for step in range(0, int(RAY_LENGTH), 5):
+                        point_on_ray = self.pos + ray_dir * step
+                        if point_on_ray.distance_to(ghost_pos) < c_radius:
+                            if step < closest_hit_dist:
+                                closest_hit_dist = step
+                                hit_type = c_type
+                                hit_color = c_color
+                            # Found the closest hit for this ray, break inner loops
+                            break 
+                    # If we found a hit, we don't need to check other ghost positions for this object
+                    if closest_hit_dist < RAY_LENGTH and hit_type == c_type:
+                        break
+            
             normalized_dist = closest_hit_dist / RAY_LENGTH
             ray_outputs.extend([normalized_dist, float(hit_type)])
-
-            # For drawing/visualization
+            
             end_pos = self.pos + ray_dir * closest_hit_dist
             self.raycast_results_for_drawing.append((self.pos, end_pos, hit_color))
 
         return ray_outputs
-
     def explode(self):
         if self.is_exploding: return
         self.is_exploding = True
@@ -605,7 +616,12 @@ if __name__ == "__main__":
                 
                 agent.replay_buffer.push(state, action, next_state, reward_tensor)
                 state = next_state
-                agent.learn()
+                # --- NEW: Loop to learn multiple times per step ---
+                if len(agent.replay_buffer) > agent.BATCH_SIZE:
+                    for _ in range(agent.LEARNING_UPDATES_PER_STEP):
+                        agent.learn()
+
+                # Soft update of the target network's weights
                 agent.update_target_net()
             else: # In eval mode, just update the state
                  if not done:
