@@ -623,13 +623,7 @@ if __name__ == "__main__":
                     agent.steps_done = EXPLORATION_JOLT_VALUE
                     print(f"Nouveau steps_done : {agent.steps_done}. L'agent va être plus curieux.")
 
-                # Si l'agent ne s'améliore pas depuis 200 épisodes, il est bloqué.
-                if episodes_since_improvement > 200:
-                    print("--- L'AGENT EST BLOQUÉ ! RÉINITIALISATION DE L'EXPLORATION. ---")
-                    # On réinitialise sa curiosité pour le forcer à essayer de nouvelles choses
-                    agent.steps_done = 0 
-                    episodes_since_improvement = 0
-                    best_avg_score = -np.inf # On réinitialise aussi le score de référence
+
 
                 if should_save and not EVALUATION_MODE:
                     print(f"--- Saving checkpoint at episode {i_episode+1} ---")
