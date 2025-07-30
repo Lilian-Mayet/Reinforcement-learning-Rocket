@@ -30,19 +30,16 @@ ROTATION_SPEED = 0.2
 FRICTION = 0.995  # A tiny bit of drag
 
 # Game Constants
-ASTEROID_COUNT = 5 # Increased for more challenge
-ASTEROID_SPEED_MIN = 0.5
-ASTEROID_SPEED_MAX = 2
-
-
+ASTEROID_COUNT = 3 # Reduced for easier learning
+ASTEROID_SPEED_MIN = 0.3
+ASTEROID_SPEED_MAX = 1.5
 
 # Object type IDs for raycasting
 TYPE_EMPTY = 0
 TYPE_ASTEROID = 1
 TYPE_TARGET = 2
 
-
-# --- Game Object Classes (Mostly unchanged) ---
+# --- Game Object Classes ---
 
 class Particle:
     """A single particle for thruster or explosion effects."""
@@ -137,17 +134,17 @@ class Rocket:
         self.is_exploding = False
         self.raycast_results_for_drawing = [] # For visualization only
 
-    def perform_action(self, action: int):
-        """Accepte un tuple d'actions (poussée, rotation) et applique la physique."""
+    def perform_action(self, action_tuple):
+        """Accept a tuple of actions (thrust, rotation) and apply physics."""
         thrust_action, rotation_action = action_tuple
         
         # Action space: 
-        # thrust_action: 0=rien, 1=poussée
-        # rotation_action: 0=rien, 1=gauche, 2=droite
+        # thrust_action: 0=nothing, 1=thrust
+        # rotation_action: 0=nothing, 1=left, 2=right
         
         main_thruster_on = (thrust_action == 1)
-        right_thruster_on = (rotation_action == 1) # Tourner à gauche
-        left_thruster_on = (rotation_action == 2)  # Tourner à droite
+        left_thruster_on = (rotation_action == 1)  # Turn left
+        right_thruster_on = (rotation_action == 2) # Turn right
 
         # --- Handle Rotation ---
         if left_thruster_on:
@@ -160,10 +157,10 @@ class Rocket:
         # --- Handle Main Thrust ---
         if main_thruster_on:
             # Pygame angle is counter-clockwise, 0 is right. Math angle is standard.
-            rad_angle = math.radians(self.angle+90)
-            acc = pygame.math.Vector2(math.cos(rad_angle), -math.sin(rad_angle)) * THRUST_POWER
+            rad_angle = math.radians(self.angle)
+            acc = pygame.math.Vector2(math.cos(rad_angle), math.sin(rad_angle)) * THRUST_POWER
             self.vel += acc
-            self.spawn_particles(side_angle=90, strength=5)
+            self.spawn_particles(side_angle=180, strength=5)
 
     def update(self):
         """Updates physics and particles."""
@@ -183,8 +180,6 @@ class Rocket:
         if self.pos.x < 0: self.pos.x = SCREEN_WIDTH
         if self.pos.y > SCREEN_HEIGHT: self.pos.y = 0
         if self.pos.y < 0: self.pos.y = SCREEN_HEIGHT
-
-
     
     def explode(self):
         if self.is_exploding: return
@@ -211,7 +206,6 @@ class Rocket:
         if not self.is_exploding:
             screen.blit(self.image, self.rect)
 
-
     def spawn_particles(self, side_angle, strength, offset_mult=1.0):
         # Calculate angle relative to the rocket's current direction
         angle_rad = math.radians(self.angle + side_angle)
@@ -227,34 +221,37 @@ class Rocket:
             radius = random.uniform(2, 5)
             self.particles.append(Particle(spawn_pos, particle_vel, radius, ORANGE, lifespan))
 
-
 # --- RL Environment ---
 
 class RocketEnv:
     """The Reinforcement Learning Environment."""
     def __init__(self):
         pygame.init()
-        self.screen =pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 36)
 
-
+        # Create simple colored rectangles if images don't exist
         try:
             rocket_img_orig = pygame.image.load("image/ship.png").convert_alpha()
             asteroid_img_orig = pygame.image.load("image/asteroid.png").convert_alpha()
             self.rocket_img = pygame.transform.scale(rocket_img_orig, (40, 55))
             self.asteroid_img = pygame.transform.scale(asteroid_img_orig, (70, 70))
-        except pygame.error as e:
-            print(str(e))
-            print("Error loading images! Make sure 'ship.png' and 'asteroid.png' are in an 'image' folder.")
-            pygame.quit()
-            exit()
+        except pygame.error:
+            print("Images not found, creating simple colored shapes")
+            self.rocket_img = pygame.Surface((40, 55))
+            self.rocket_img.fill(WHITE)
+            pygame.draw.polygon(self.rocket_img, RED, [(20, 0), (0, 55), (40, 55)])
+            
+            self.asteroid_img = pygame.Surface((70, 70))
+            self.asteroid_img.fill(GRAY)
+            pygame.draw.circle(self.asteroid_img, (100, 100, 100), (35, 35), 35)
+
         self.action_space_n = 4
 
-
         n_ship_state = 7
-        n_target_state = 2
-        n_asteroid_state = ASTEROID_COUNT * 4
+        n_target_state = 3  # Added distance to target
+        n_asteroid_state = ASTEROID_COUNT * 5  # Added distance to each asteroid
         self.observation_space_shape = (n_ship_state + n_target_state + n_asteroid_state,)
 
     def reset(self):
@@ -264,92 +261,116 @@ class RocketEnv:
         self.target = Target()
         self.score = 0
         self.steps = 0
-        self.max_steps = 2500 # End episode if it takes too long
+        self.max_steps = 1500  # Reduced for faster training episodes
         self.distance_to_target = self.player.pos.distance_to(self.target.pos)
+        self.previous_distance_to_target = self.distance_to_target
 
         return self._get_observation()
 
     def _get_observation(self):
-            """
-            Constructs the observation vector for the agent with global coordinates.
-            All values are normalized to be roughly between -1 and 1.
-            """
-            state = []
+        """
+        Constructs the observation vector for the agent with normalized values.
+        """
+        state = []
 
-            # --- 1. Ship's own state (normalized) ---
-            angle_rad = math.radians(self.player.angle)
-            state.extend([
-                self.player.pos.x / SCREEN_WIDTH,
-                self.player.pos.y / SCREEN_HEIGHT,
-                self.player.vel.x / 10.0,  # Normalize velocity by a reasonable max
-                self.player.vel.y / 10.0,
-                math.cos(angle_rad),
-                -math.sin(angle_rad),
-                self.player.angle_vel/100 #normalize
-            ])
+        # --- 1. Ship's own state (normalized) ---
+        angle_rad = math.radians(self.player.angle)
+        state.extend([
+            (self.player.pos.x - SCREEN_WIDTH/2) / (SCREEN_WIDTH/2),  # Centered normalization
+            (self.player.pos.y - SCREEN_HEIGHT/2) / (SCREEN_HEIGHT/2),
+            self.player.vel.x / 5.0,  # Normalize velocity
+            self.player.vel.y / 5.0,
+            math.cos(angle_rad),  # Direction as unit vector
+            math.sin(angle_rad),
+            self.player.angle_vel / 10.0  # Normalize angular velocity
+        ])
 
-            # --- 2. Target's state (normalized) ---
-            state.extend([
-                self.target.pos.x / SCREEN_WIDTH,
-                self.target.pos.y / SCREEN_HEIGHT,
-            ])
+        # --- 2. Target's state (normalized + distance) ---
+        target_dx = (self.target.pos.x - self.player.pos.x) / SCREEN_WIDTH
+        target_dy = (self.target.pos.y - self.player.pos.y) / SCREEN_HEIGHT
+        target_distance = self.distance_to_target / (SCREEN_WIDTH + SCREEN_HEIGHT)  # Normalize distance
+        
+        state.extend([target_dx, target_dy, target_distance])
 
-            # --- 3. Asteroids' state (normalized) ---
-            for asteroid in self.asteroids:
-                state.extend([
-                    asteroid.pos.x / SCREEN_WIDTH,
-                    asteroid.pos.y / SCREEN_HEIGHT,
-                    asteroid.vel.x / 4.0, # Asteroids are slower, normalize by smaller max
-                    asteroid.vel.y / 4.0,
-                ])
+        # --- 3. Asteroids' state (normalized + distances) ---
+        for asteroid in self.asteroids:
+            ast_dx = (asteroid.pos.x - self.player.pos.x) / SCREEN_WIDTH
+            ast_dy = (asteroid.pos.y - self.player.pos.y) / SCREEN_HEIGHT
+            ast_vel_x = asteroid.vel.x / 2.0
+            ast_vel_y = asteroid.vel.y / 2.0
+            ast_distance = self.player.pos.distance_to(asteroid.pos) / (SCREEN_WIDTH + SCREEN_HEIGHT)
             
-            
-            return np.array(state, dtype=np.float32)
+            state.extend([ast_dx, ast_dy, ast_vel_x, ast_vel_y, ast_distance])
+        
+        return np.array(state, dtype=np.float32)
+
     def step(self, action):
         self.steps += 1
         reward = 0
         done = False
         info = {}
+        
         self.player.perform_action(action)
         self.player.update()
-        for asteroid in self.asteroids: asteroid.update()
+        for asteroid in self.asteroids: 
+            asteroid.update()
 
-        # 1. Time penalty (encourages speed)
-        reward -= 0.01 # Small penalty for every step taken.
+        # Update distances
+        self.previous_distance_to_target = self.distance_to_target
+        self.distance_to_target = self.player.pos.distance_to(self.target.pos)
 
-        # 2. Distance-based reward (Simplified and more effective)
-        new_dist = self.player.pos.distance_to(self.target.pos)
-        # Reward is the amount of progress made toward the target.
-        reward += (self.distance_to_target - new_dist) * 0.2 # Increased incentive
-        distance_bonus = 5.0 / (new_dist + 1.0)
-        reward += distance_bonus 
-        self.distance_to_target = new_dist
+        # --- REWARD STRUCTURE ---
+        
+        # 1. Small time penalty to encourage efficiency
+        reward -= 0.001
+        
+        # 2. Progress reward - reward getting closer to target
+        progress = self.previous_distance_to_target - self.distance_to_target
+        reward += progress * 0.01  # Scale factor for progress reward
+        
+        # 3. Proximity bonus - closer to target = higher reward
+        max_distance = math.sqrt(SCREEN_WIDTH**2 + SCREEN_HEIGHT**2)
+        proximity_bonus = (max_distance - self.distance_to_target) / max_distance * 0.1
+        reward += proximity_bonus
+        
+        # 4. Velocity alignment reward
+        if self.distance_to_target > 0:
+            target_direction = (self.target.pos - self.player.pos).normalize()
+            velocity_alignment = 0
+            if self.player.vel.length() > 0.1:  # Only if moving
+                velocity_direction = self.player.vel.normalize()
+                velocity_alignment = target_direction.dot(velocity_direction)
+            reward += velocity_alignment * 0.05
 
-        speed = self.player.vel.length()
-
-
-        # --- 3. RE-ENABLE ALIGNMENT REWARD ---
-        #vec_to_target = (self.target.pos - self.player.pos).normalize()
-        # Use the same physics as the thruster for the forward vector
-        #rocket_forward_vec = pygame.math.Vector2(math.sin(math.radians(self.player.angle)), -math.cos(math.radians(self.player.angle)))
-        #alignment_reward = rocket_forward_vec.dot(vec_to_target)
-        #reward += alignment_reward * 0.02 # Give a small, continuous reward for pointing correctly
-
-        # --- Event-based rewards (large one-time rewards/penalties) ---
+        # --- Event-based rewards ---
+        
+        # Target collection
         if self.distance_to_target < self.player.radius + self.target.radius:
-            reward += 200
+            reward += 100  # Large positive reward
             self.score += 1
             self.target.spawn()
             self.distance_to_target = self.player.pos.distance_to(self.target.pos)
+            self.previous_distance_to_target = self.distance_to_target
             info['target_collected'] = True
 
+        # Asteroid collision
         for asteroid in self.asteroids:
             if self.player.pos.distance_to(asteroid.pos) < self.player.radius + asteroid.radius:
-                reward -= 100
+                reward -= 50  # Large negative reward
                 self.player.explode()
                 done = True
                 info['crashed'] = True
                 break
+
+        # Asteroid proximity penalty (to encourage avoidance)
+        min_asteroid_distance = float('inf')
+        for asteroid in self.asteroids:
+            dist = self.player.pos.distance_to(asteroid.pos)
+            min_asteroid_distance = min(min_asteroid_distance, dist)
+        
+        if min_asteroid_distance < 100:  # If too close to any asteroid
+            proximity_penalty = (100 - min_asteroid_distance) / 100 * 0.5
+            reward -= proximity_penalty
                 
         if self.steps >= self.max_steps:
             done = True
@@ -357,6 +378,7 @@ class RocketEnv:
 
         observation = self._get_observation()
         return observation, reward, done, info
+
     def render(self):
         """Draws the environment to the screen."""
         if self.screen is None:
@@ -382,15 +404,10 @@ class RocketEnv:
     def close(self):
         pygame.quit()
 
-
-
-
 # --- NEURAL NETWORK AND AGENT ---
 
-# Use a GPU if available, otherwise use the CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# namedtuple for storing experiences in the Replay Buffer
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
 class ReplayBuffer:
@@ -413,129 +430,120 @@ class QNetwork(nn.Module):
     def __init__(self, n_observations):
         super(QNetwork, self).__init__()
         
-        # Le corps commun qui analyse l'état
+        # Shared body that processes the state
         self.body = nn.Sequential(
-            nn.Linear(n_observations, 128),
+            nn.Linear(n_observations, 256),
             nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(128, 64),
             nn.ReLU()
         )
         
-        # Tête n°1 : La poussée (2 actions possibles : 0=rien, 1=poussée)
+        # Head 1: Thrust (2 actions: 0=nothing, 1=thrust)
         self.thrust_head = nn.Linear(64, 2)
         
-        # Tête n°2 : La rotation (3 actions possibles : 0=rien, 1=gauche, 2=droite)
+        # Head 2: Rotation (3 actions: 0=nothing, 1=left, 2=right)
         self.rotation_head = nn.Linear(64, 3)
 
     def forward(self, x):
-        # L'état passe d'abord par le corps commun
         body_output = self.body(x)
-        
-        # Le résultat est ensuite envoyé aux deux têtes
         thrust_values = self.thrust_head(body_output)
         rotation_values = self.rotation_head(body_output)
-        
-        # On retourne les Q-valeurs pour chaque branche
         return thrust_values, rotation_values
 
 class DQNAgent:
     def __init__(self, env):
         # Hyperparameters
-        self.BATCH_SIZE = 256
-        self.GAMMA = 0.99
-        self.EPS_START = 0.9
-        self.EPS_END = 0.05
-        self.EPS_DECAY = 5000
-        self.TAU = 0.01 # Target network update rate
-        self.LR = 3e-4 # Learning rate
-        self.REPLAY_BUFFER_SIZE = 20000 # Store more diverse experiences.
-        self.LEARNING_UPDATES_PER_STEP = 1 # Perform multiple learning steps for each action taken.
+        self.BATCH_SIZE = 128
+        self.GAMMA = 0.995  # Slightly higher discount factor
+        self.EPS_START = 1.0
+        self.EPS_END = 0.02
+        self.EPS_DECAY = 10000  # Slower decay for more exploration
+        self.TAU = 0.005  # Slower target network update
+        self.LR = 1e-4  # Lower learning rate
+        self.REPLAY_BUFFER_SIZE = 50000
+        self.LEARNING_UPDATES_PER_STEP = 1
+        self.MIN_BUFFER_SIZE = 2000  # Wait for more experiences before learning
 
         self.replay_buffer = ReplayBuffer(self.REPLAY_BUFFER_SIZE)
-
         self.env = env
-        # L'action n'est plus un seul nombre, on retire self.n_actions pour éviter la confusion
         n_observations = env.observation_space_shape[0]
 
-        # On initialise le nouveau réseau
         self.policy_net = QNetwork(n_observations).to(device)
         self.target_net = QNetwork(n_observations).to(device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
 
-        self.optimizer = optim.AdamW(self.policy_net.parameters(), lr=self.LR, amsgrad=True)
-        self.replay_buffer = ReplayBuffer(self.REPLAY_BUFFER_SIZE)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.LR)
         self.steps_done = 0
 
     def choose_action(self, state):
-        """Choisit une action pour chaque branche en utilisant epsilon-greedy."""
+        """Choose action for each branch using epsilon-greedy."""
         eps_threshold = self.EPS_END + (self.EPS_START - self.EPS_END) * \
-            math.exp(-1. * self.steps_done) # Ajustement possible ici
+            math.exp(-1. * self.steps_done / self.EPS_DECAY)
         self.steps_done += 1
      
         if random.random() > eps_threshold:
             # EXPLOITATION
             with torch.no_grad():
-                # Le réseau retourne deux tenseurs de Q-valeurs
                 thrust_q_values, rotation_q_values = self.policy_net(state)
-                
-                # On choisit la meilleure action pour chaque branche
                 thrust_action = torch.argmax(thrust_q_values).view(1, 1)
                 rotation_action = torch.argmax(rotation_q_values).view(1, 1)
         else:
             # EXPLORATION
-            # On choisit une action aléatoire pour chaque branche
             thrust_action = torch.tensor([[random.randrange(2)]], device=device, dtype=torch.long)
             rotation_action = torch.tensor([[random.randrange(3)]], device=device, dtype=torch.long)
             
-        # On retourne les deux actions choisies
         return thrust_action, rotation_action
 
     def learn(self):
-        """Effectue une étape d'optimisation avec des pertes séparées pour chaque branche."""
-        if len(self.replay_buffer) < self.BATCH_SIZE:
+        """Perform one optimization step with separate losses for each branch."""
+        if len(self.replay_buffer) < self.MIN_BUFFER_SIZE:
             return
 
         transitions = self.replay_buffer.sample(self.BATCH_SIZE)
         batch = Transition(*zip(*transitions))
 
-        # ... (la préparation des batchs est similaire)
-        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.next_state)), device=device, dtype=torch.bool)
+        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.next_state)), 
+                                     device=device, dtype=torch.bool)
         non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
         state_batch = torch.cat(batch.state)
         reward_batch = torch.cat(batch.reward)
         
-        # L'action est maintenant un tuple, il faut la décompresser
+        # Unpack actions
         thrust_action_batch = torch.cat([a[0] for a in batch.action])
         rotation_action_batch = torch.cat([a[1] for a in batch.action])
 
-        # Calculer Q(s_t, a) pour chaque branche
+        # Compute Q(s_t, a) for each branch
         thrust_q_values, rotation_q_values = self.policy_net(state_batch)
         
         current_thrust_q = thrust_q_values.gather(1, thrust_action_batch)
         current_rotation_q = rotation_q_values.gather(1, rotation_action_batch)
 
-        # Calculer V(s_{t+1}) pour chaque branche
+        # Compute V(s_{t+1}) for each branch
         next_thrust_q_values = torch.zeros(self.BATCH_SIZE, device=device)
         next_rotation_q_values = torch.zeros(self.BATCH_SIZE, device=device)
-        with torch.no_grad():
-            # Le target_net retourne aussi deux Q-valeurs
-            next_thrust_raw, next_rotation_raw = self.target_net(non_final_next_states)
-            next_thrust_q_values[non_final_mask] = next_thrust_raw.max(1)[0]
-            next_rotation_q_values[non_final_mask] = next_rotation_raw.max(1)[0]
         
-        # Calculer la Q-valeur attendue pour chaque branche
+        with torch.no_grad():
+            if len(non_final_next_states) > 0:  # Check if we have valid next states
+                next_thrust_raw, next_rotation_raw = self.target_net(non_final_next_states)
+                next_thrust_q_values[non_final_mask] = next_thrust_raw.max(1)[0]
+                next_rotation_q_values[non_final_mask] = next_rotation_raw.max(1)[0]
+        
+        # Compute expected Q values
         expected_thrust_q = (next_thrust_q_values * self.GAMMA) + reward_batch
         expected_rotation_q = (next_rotation_q_values * self.GAMMA) + reward_batch
 
-        # Calculer la perte pour chaque branche
+        # Compute losses
         criterion = nn.SmoothL1Loss()
         thrust_loss = criterion(current_thrust_q, expected_thrust_q.unsqueeze(1))
         rotation_loss = criterion(current_rotation_q, expected_rotation_q.unsqueeze(1))
         
-        # La perte totale est la somme des pertes des branches
         total_loss = thrust_loss + rotation_loss
 
-        # Optimiser le modèle
+        # Optimize
         self.optimizer.zero_grad()
         total_loss.backward()
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
@@ -549,27 +557,18 @@ class DQNAgent:
             target_net_state_dict[key] = policy_net_state_dict[key]*self.TAU + target_net_state_dict[key]*(1-self.TAU)
         self.target_net.load_state_dict(target_net_state_dict)
 
-
 if __name__ == "__main__":
-    EVALUATION_MODE = False # <-- SET TO True TO WATCH, False TO TRAIN
+    EVALUATION_MODE = False  # Set to True to watch, False to train
     env = RocketEnv()
     agent = DQNAgent(env)
 
-    # --- AJOUT : Paramètres pour le "Jolt" d'Exploration Périodique ---
-    EXPLORATION_JOLT_EPISODES = 50 # Le nombre d'épisodes entre chaque "jolt".
-    EXPLORATION_JOLT_VALUE = 500    # La valeur à laquelle on réinitialise steps_done.
-                                    # Assez bas pour augmenter epsilon, mais pas à zéro.
-
-   # --- Load the model ---
+    # Load the model if it exists
     if os.path.exists(MODEL_PATH):
         print(f"Loading model from {MODEL_PATH}...")
-        # Note: We load the model onto the CPU first to avoid GPU memory issues
-        # if the saving and loading environments are different.
         checkpoint = torch.load(MODEL_PATH, map_location=device)
         agent.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
         
         if not EVALUATION_MODE:
-            # If we are continuing to train, load everything
             agent.target_net.load_state_dict(checkpoint['target_net_state_dict'])
             agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             agent.steps_done = checkpoint['steps_done']
@@ -580,17 +579,19 @@ if __name__ == "__main__":
             exit()
 
     if EVALUATION_MODE:
-        # In evaluation, we don't need random actions or gradients
         agent.policy_net.eval()
-        num_episodes = 20 # Run for 20 episodes to watch
-        render_every = 1  # Render every episode
+        num_episodes = 20
+        render_every = 1
         save_every = 1000
     else:
-        # In training mode
         agent.policy_net.train()
-        num_episodes = 10000
-        render_every = 10
-        save_every = 50
+        num_episodes = 5000
+        render_every = 50  # Render less frequently during training
+        save_every = 100
+
+    # Training statistics
+    episode_rewards = []
+    episode_scores = []
 
     for i_episode in range(num_episodes):
         state = env.reset()
@@ -601,40 +602,23 @@ if __name__ == "__main__":
 
         while True:
             if EVALUATION_MODE:
-                # En mode évaluation, on n'explore jamais.
                 with torch.no_grad():
-                    # Le réseau retourne deux tenseurs de Q-valeurs
                     thrust_q_values, rotation_q_values = agent.policy_net(state)
-                    
-                    # On choisit la meilleure action pour chaque branche
                     thrust_action = torch.argmax(thrust_q_values).item()
                     rotation_action = torch.argmax(rotation_q_values).item()
-                    
-                    # On stocke les tenseurs pour le buffer (même si on ne l'utilise pas en eval)
                     thrust_action_tensor = torch.tensor([[thrust_action]], device=device, dtype=torch.long)
                     rotation_action_tensor = torch.tensor([[rotation_action]], device=device, dtype=torch.long)
-
-            else: # En mode entraînement, on utilise la méthode choose_action avec epsilon-greedy
+            else:
                 thrust_action_tensor, rotation_action_tensor = agent.choose_action(state)
                 thrust_action = thrust_action_tensor.item()
                 rotation_action = rotation_action_tensor.item()
             
-            # On combine les actions en un tuple pour l'environnement
             action_tuple = (thrust_action, rotation_action)
-
-            # =========================================================================
-            # ÉTAPE 2 : INTERACTION AVEC L'ENVIRONNEMENT
-            # =========================================================================
             observation, reward, done, info = env.step(action_tuple)
             total_reward += reward
 
-            # =========================================================================
-            # ÉTAPE 3 : APPRENTISSAGE (si en mode entraînement)
-            # =========================================================================
             if not EVALUATION_MODE:
                 reward_tensor = torch.tensor([reward], device=device)
-                
-                # Le tuple d'actions à stocker dans le buffer de replay
                 action_for_buffer = (thrust_action_tensor, rotation_action_tensor)
                 
                 if done:
@@ -642,25 +626,18 @@ if __name__ == "__main__":
                 else:
                     next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
                 
-                # Stocker la transition
                 agent.replay_buffer.push(state, action_for_buffer, next_state, reward_tensor)
-                
-                # Passer à l'état suivant
                 state = next_state
                 
-                # Apprendre à partir des expériences passées
-                if len(agent.replay_buffer) > agent.BATCH_SIZE:
+                # Learn from experiences
+                if len(agent.replay_buffer) > agent.MIN_BUFFER_SIZE:
                     for _ in range(agent.LEARNING_UPDATES_PER_STEP):
-                      
                         agent.learn()
                 
-                # Mettre à jour le réseau cible
                 agent.update_target_net()
-
-            else: # En mode évaluation, on met juste à jour l'état
+            else:
                 if not done:
                     state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-
 
             if should_render:
                 env.render()
@@ -668,24 +645,25 @@ if __name__ == "__main__":
                     if event.type == pygame.QUIT:
                         env.close()
                         exit()
-
             
             if done:
-                print(f"Episode {i_episode+1} | Score: {env.score} | Total Reward: {total_reward:.2f}")
+                episode_rewards.append(total_reward)
+                episode_scores.append(env.score)
+                
+                # Print statistics
+                if len(episode_rewards) >= 100:
+                    avg_reward = sum(episode_rewards[-100:]) / 100
+                    avg_score = sum(episode_scores[-100:]) / 100
+                    eps_threshold = agent.EPS_END + (agent.EPS_START - agent.EPS_END) * \
+                        math.exp(-1. * agent.steps_done / agent.EPS_DECAY)
+                    print(f"Episode {i_episode+1} | Score: {env.score} | Reward: {total_reward:.2f} | "
+                          f"Avg100 Reward: {avg_reward:.2f} | Avg100 Score: {avg_score:.2f} | "
+                          f"Epsilon: {eps_threshold:.3f}")
+                else:
+                    print(f"Episode {i_episode+1} | Score: {env.score} | Total Reward: {total_reward:.2f}")
+                
                 if should_render:
-                    pygame.time.wait(1000) 
-
-
-
-#                Tous les 100 épisodes (et pas à l'épisode 0), on applique le jolt.
-                if (i_episode + 1) % EXPLORATION_JOLT_EPISODES == 0 and i_episode > 0:
-                    print(f"--- JOLT D'EXPLORATION PÉRIODIQUE À L'ÉPISODE {i_episode+1} ! ---")
-                    print(f"Ancien steps_done : {agent.steps_done}")
-                    # On réinitialise steps_done à une valeur basse pour booster epsilon
-                    agent.steps_done = EXPLORATION_JOLT_VALUE
-                    print(f"Nouveau steps_done : {agent.steps_done}. L'agent va être plus curieux.")
-
-
+                    pygame.time.wait(1000)
 
                 if should_save and not EVALUATION_MODE:
                     print(f"--- Saving checkpoint at episode {i_episode+1} ---")
@@ -700,7 +678,7 @@ if __name__ == "__main__":
     # Only save if we were training
     if not EVALUATION_MODE:
         print('Training complete')
-        print(f"Saving checkpoint to {MODEL_PATH}...")
+        print(f"Saving final checkpoint to {MODEL_PATH}...")
         torch.save({
             'policy_net_state_dict': agent.policy_net.state_dict(),
             'target_net_state_dict': agent.target_net.state_dict(),
