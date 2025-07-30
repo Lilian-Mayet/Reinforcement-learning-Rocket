@@ -423,14 +423,14 @@ class DQNAgent:
     def __init__(self, env):
         # Hyperparameters
         self.BATCH_SIZE = 256
-        self.GAMMA = 0.95
+        self.GAMMA = 0.99
         self.EPS_START = 0.9
         self.EPS_END = 0.05
-        self.EPS_DECAY = 1000
+        self.EPS_DECAY = 1500
         self.TAU = 0.01 # Target network update rate
         self.LR = 3e-4 # Learning rate
-        self.REPLAY_BUFFER_SIZE = 20000 # Store more diverse experiences.
-        self.LEARNING_UPDATES_PER_STEP = 2 # Perform multiple learning steps for each action taken.
+        self.REPLAY_BUFFER_SIZE = 50000 # Store more diverse experiences.
+        self.LEARNING_UPDATES_PER_STEP = 1 # Perform multiple learning steps for each action taken.
 
         self.replay_buffer = ReplayBuffer(self.REPLAY_BUFFER_SIZE)
 
@@ -523,10 +523,10 @@ if __name__ == "__main__":
     env = RocketEnv()
     agent = DQNAgent(env)
 
-        # --- AJOUT : Suivi des performances pour l'exploration intelligente ---
-    scores_deque = deque(maxlen=100) # Stocke les 100 derniers scores
-    best_avg_score = -np.inf # Garde en mémoire le meilleur score moyen
-    episodes_since_improvement = 0
+    # --- AJOUT : Paramètres pour le "Jolt" d'Exploration Périodique ---
+    EXPLORATION_JOLT_EPISODES = 100 # Le nombre d'épisodes entre chaque "jolt".
+    EXPLORATION_JOLT_VALUE = 500    # La valeur à laquelle on réinitialise steps_done.
+                                    # Assez bas pour augmenter epsilon, mais pas à zéro.
 
    # --- Load the model ---
     if os.path.exists(MODEL_PATH):
@@ -615,17 +615,13 @@ if __name__ == "__main__":
 
 
 
-                 # --- AJOUT : Logique de l'exploration intelligente ---
-                scores_deque.append(env.score)
-                current_avg_score = np.mean(scores_deque)
-
-                if len(scores_deque) == 100: # Attendre d'avoir assez de données
-                    if current_avg_score > best_avg_score:
-                        best_avg_score = current_avg_score
-                        episodes_since_improvement = 0
-                        print(f"!!! Nouveau meilleur score moyen : {best_avg_score:.2f} !!!")
-                    else:
-                        episodes_since_improvement += 1
+#                Tous les 100 épisodes (et pas à l'épisode 0), on applique le jolt.
+                if (i_episode + 1) % EXPLORATION_JOLT_EPISODES == 0 and i_episode > 0:
+                    print(f"--- JOLT D'EXPLORATION PÉRIODIQUE À L'ÉPISODE {i_episode+1} ! ---")
+                    print(f"Ancien steps_done : {agent.steps_done}")
+                    # On réinitialise steps_done à une valeur basse pour booster epsilon
+                    agent.steps_done = EXPLORATION_JOLT_VALUE
+                    print(f"Nouveau steps_done : {agent.steps_done}. L'agent va être plus curieux.")
 
                 # Si l'agent ne s'améliore pas depuis 200 épisodes, il est bloqué.
                 if episodes_since_improvement > 200:
