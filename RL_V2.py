@@ -559,11 +559,14 @@ class DQNAgent:
 
 if __name__ == "__main__":
     EVALUATION_MODE = False  # Set to True to watch, False to train
+    MANUAL_MODE = False      # Set to True to manually control the ship
     env = RocketEnv()
-    agent = DQNAgent(env)
+    
+    if not MANUAL_MODE:
+        agent = DQNAgent(env)
 
-    # Load the model if it exists
-    if os.path.exists(MODEL_PATH):
+    # Load the model if it exists (only for AI modes)
+    if not MANUAL_MODE and os.path.exists(MODEL_PATH):
         print(f"Loading model from {MODEL_PATH}...")
         checkpoint = torch.load(MODEL_PATH, map_location=device)
         agent.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
@@ -572,13 +575,25 @@ if __name__ == "__main__":
             agent.target_net.load_state_dict(checkpoint['target_net_state_dict'])
             agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             agent.steps_done = checkpoint['steps_done']
-    else:
+    elif not MANUAL_MODE:
         print("No pre-trained model found.")
         if EVALUATION_MODE:
             print("Cannot run in evaluation mode without a model. Exiting.")
             exit()
 
-    if EVALUATION_MODE:
+    if MANUAL_MODE:
+        print("Manual control mode activated!")
+        print("Controls:")
+        print("  WASD or Arrow Keys: Thrust and rotation")
+        print("  W/Up: Main thruster")
+        print("  A/Left: Rotate left")
+        print("  D/Right: Rotate right")
+        print("  ESC: Quit")
+        num_episodes = 1  # Just one continuous episode
+        render_every = 1
+        save_every = 1000
+
+    elif EVALUATION_MODE:
         agent.policy_net.eval()
         num_episodes = 20
         render_every = 1
@@ -593,31 +608,61 @@ if __name__ == "__main__":
     episode_rewards = []
     episode_scores = []
 
+    def get_manual_action():
+        """Get action from keyboard input for manual control."""
+        keys = pygame.key.get_pressed()
+        
+        # Thrust action: 0=nothing, 1=thrust
+        thrust_action = 1 if (keys[pygame.K_w] or keys[pygame.K_UP]) else 0
+        
+        # Rotation action: 0=nothing, 1=left, 2=right
+        rotation_action = 0
+        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+            rotation_action = 1  # Turn left
+        elif keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+            rotation_action = 2  # Turn right
+            
+        return (thrust_action, rotation_action)
+
     for i_episode in range(num_episodes):
         state = env.reset()
-        state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        if not MANUAL_MODE:
+            state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         total_reward = 0
-        should_render = (i_episode + 1) % render_every == 0
+        should_render = (i_episode + 1) % render_every == 0 or MANUAL_MODE
         should_save = (i_episode + 1) % save_every == 0
 
         while True:
-            if EVALUATION_MODE:
+            # Handle pygame events first
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                    env.close()
+                    exit()
+
+            if MANUAL_MODE:
+                # Manual control
+                action_tuple = get_manual_action()
+            elif EVALUATION_MODE:
+                # AI evaluation mode
                 with torch.no_grad():
                     thrust_q_values, rotation_q_values = agent.policy_net(state)
                     thrust_action = torch.argmax(thrust_q_values).item()
                     rotation_action = torch.argmax(rotation_q_values).item()
                     thrust_action_tensor = torch.tensor([[thrust_action]], device=device, dtype=torch.long)
                     rotation_action_tensor = torch.tensor([[rotation_action]], device=device, dtype=torch.long)
+                action_tuple = (thrust_action, rotation_action)
             else:
+                # AI training mode
                 thrust_action_tensor, rotation_action_tensor = agent.choose_action(state)
                 thrust_action = thrust_action_tensor.item()
                 rotation_action = rotation_action_tensor.item()
+                action_tuple = (thrust_action, rotation_action)
             
-            action_tuple = (thrust_action, rotation_action)
             observation, reward, done, info = env.step(action_tuple)
             total_reward += reward
 
-            if not EVALUATION_MODE:
+            if not EVALUATION_MODE and not MANUAL_MODE:
+                # Training mode - store experience and learn
                 reward_tensor = torch.tensor([reward], device=device)
                 action_for_buffer = (thrust_action_tensor, rotation_action_tensor)
                 
@@ -635,48 +680,62 @@ if __name__ == "__main__":
                         agent.learn()
                 
                 agent.update_target_net()
-            else:
+            elif not MANUAL_MODE:
+                # Evaluation mode - just update state
                 if not done:
                     state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
 
             if should_render:
                 env.render()
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        env.close()
-                        exit()
             
             if done:
-                episode_rewards.append(total_reward)
-                episode_scores.append(env.score)
-                
-                # Print statistics
-                if len(episode_rewards) >= 100:
-                    avg_reward = sum(episode_rewards[-100:]) / 100
-                    avg_score = sum(episode_scores[-100:]) / 100
-                    eps_threshold = agent.EPS_END + (agent.EPS_START - agent.EPS_END) * \
-                        math.exp(-1. * agent.steps_done / agent.EPS_DECAY)
-                    print(f"Episode {i_episode+1} | Score: {env.score} | Reward: {total_reward:.2f} | "
-                          f"Avg100 Reward: {avg_reward:.2f} | Avg100 Score: {avg_score:.2f} | "
-                          f"Epsilon: {eps_threshold:.3f}")
+                if MANUAL_MODE:
+                    print(f"Game Over! Final Score: {env.score} | Total Reward: {total_reward:.2f}")
+                    print("Press any key to restart or ESC to quit...")
+                    # Wait for key press
+                    waiting = True
+                    while waiting:
+                        for event in pygame.event.get():
+                            if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                                env.close()
+                                exit()
+                            elif event.type == pygame.KEYDOWN:
+                                waiting = False
+                                break
+                        pygame.time.wait(100)
+                    # Restart the episode
+                    continue
                 else:
-                    print(f"Episode {i_episode+1} | Score: {env.score} | Total Reward: {total_reward:.2f}")
-                
-                if should_render:
-                    pygame.time.wait(1000)
+                    episode_rewards.append(total_reward)
+                    episode_scores.append(env.score)
+                    
+                    # Print statistics
+                    if len(episode_rewards) >= 100:
+                        avg_reward = sum(episode_rewards[-100:]) / 100
+                        avg_score = sum(episode_scores[-100:]) / 100
+                        eps_threshold = agent.EPS_END + (agent.EPS_START - agent.EPS_END) * \
+                            math.exp(-1. * agent.steps_done / agent.EPS_DECAY)
+                        print(f"Episode {i_episode+1} | Score: {env.score} | Reward: {total_reward:.2f} | "
+                              f"Avg100 Reward: {avg_reward:.2f} | Avg100 Score: {avg_score:.2f} | "
+                              f"Epsilon: {eps_threshold:.3f}")
+                    else:
+                        print(f"Episode {i_episode+1} | Score: {env.score} | Total Reward: {total_reward:.2f}")
+                    
+                    if should_render:
+                        pygame.time.wait(1000)
 
-                if should_save and not EVALUATION_MODE:
-                    print(f"--- Saving checkpoint at episode {i_episode+1} ---")
-                    torch.save({
-                        'policy_net_state_dict': agent.policy_net.state_dict(),
-                        'target_net_state_dict': agent.target_net.state_dict(),
-                        'optimizer_state_dict': agent.optimizer.state_dict(),
-                        'steps_done': agent.steps_done,
-                    }, MODEL_PATH)
+                    if should_save and not EVALUATION_MODE:
+                        print(f"--- Saving checkpoint at episode {i_episode+1} ---")
+                        torch.save({
+                            'policy_net_state_dict': agent.policy_net.state_dict(),
+                            'target_net_state_dict': agent.target_net.state_dict(),
+                            'optimizer_state_dict': agent.optimizer.state_dict(),
+                            'steps_done': agent.steps_done,
+                        }, MODEL_PATH)
                 break
 
     # Only save if we were training
-    if not EVALUATION_MODE:
+    if not EVALUATION_MODE and not MANUAL_MODE:
         print('Training complete')
         print(f"Saving final checkpoint to {MODEL_PATH}...")
         torch.save({
@@ -685,5 +744,7 @@ if __name__ == "__main__":
             'optimizer_state_dict': agent.optimizer.state_dict(),
             'steps_done': agent.steps_done,
         }, MODEL_PATH)
+    elif MANUAL_MODE:
+        print("Manual mode ended. Thanks for playing!")
 
     env.close()
