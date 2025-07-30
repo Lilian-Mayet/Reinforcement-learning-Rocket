@@ -149,18 +149,18 @@ class Rocket:
         # --- Handle Rotation ---
         if left_thruster_on:
             self.angle_vel -= ROTATION_SPEED
-            self.spawn_particles(side_angle=0, strength=2, offset_mult=0.3)
+            self.spawn_particles(side_angle=-90, strength=2, offset_mult=0.3)
         if right_thruster_on:
             self.angle_vel += ROTATION_SPEED
-            self.spawn_particles(side_angle=180, strength=2, offset_mult=0.3)
+            self.spawn_particles(side_angle=90, strength=2, offset_mult=0.3)
 
         # --- Handle Main Thrust ---
         if main_thruster_on:
             # Pygame angle is counter-clockwise, 0 is right. Math angle is standard.
-            rad_angle = math.radians(self.angle)
+            rad_angle = math.radians(-self.angle)
             acc = pygame.math.Vector2(math.cos(rad_angle), math.sin(rad_angle)) * THRUST_POWER
             self.vel += acc
-            self.spawn_particles(side_angle=180, strength=5)
+            #self.spawn_particles(side_angle=self.angle, strength=5)
 
     def update(self):
         """Updates physics and particles."""
@@ -235,11 +235,11 @@ class RocketEnv:
         try:
             rocket_img_orig = pygame.image.load("image/ship.png").convert_alpha()
             asteroid_img_orig = pygame.image.load("image/asteroid.png").convert_alpha()
-            self.rocket_img = pygame.transform.scale(rocket_img_orig, (40, 55))
+            self.rocket_img = pygame.transform.scale(rocket_img_orig, (55, 40))
             self.asteroid_img = pygame.transform.scale(asteroid_img_orig, (70, 70))
         except pygame.error:
             print("Images not found, creating simple colored shapes")
-            self.rocket_img = pygame.Surface((40, 55))
+            self.rocket_img = pygame.Surface((55, 40))
             self.rocket_img.fill(WHITE)
             pygame.draw.polygon(self.rocket_img, RED, [(20, 0), (0, 55), (40, 55)])
             
@@ -559,7 +559,7 @@ class DQNAgent:
 
 if __name__ == "__main__":
     EVALUATION_MODE = False  # Set to True to watch, False to train
-    MANUAL_MODE = False      # Set to True to manually control the ship
+    MANUAL_MODE = False  # Set to True to manually control the ship
     env = RocketEnv()
     
     if not MANUAL_MODE:
