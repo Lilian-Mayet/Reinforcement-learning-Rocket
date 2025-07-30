@@ -30,14 +30,11 @@ ROTATION_SPEED = 0.2
 FRICTION = 0.995  # A tiny bit of drag
 
 # Game Constants
-ASTEROID_COUNT = 5 # Increased for more challenge
+ASTEROID_COUNT = 8 # Increased for more challenge
 ASTEROID_SPEED_MIN = 0.5
-ASTEROID_SPEED_MAX = 1.2
+ASTEROID_SPEED_MAX = 2
 
-# RL Constants
-RAY_COUNT = 50
-RAY_LENGTH = 800
-FOV = 360 # Field of view in degrees
+
 
 # Object type IDs for raycasting
 TYPE_EMPTY = 0
@@ -159,7 +156,7 @@ class Rocket:
         # --- Handle Main Thrust ---
         if main_thruster_on:
             # Pygame angle is counter-clockwise, 0 is right. Math angle is standard.
-            rad_angle = math.radians(self.angle)
+            rad_angle = math.radians(self.angle+90)
             acc = pygame.math.Vector2(math.cos(rad_angle), -math.sin(rad_angle)) * THRUST_POWER
             self.vel += acc
             self.spawn_particles(side_angle=90, strength=5)
@@ -183,62 +180,8 @@ class Rocket:
         if self.pos.y > SCREEN_HEIGHT: self.pos.y = 0
         if self.pos.y < 0: self.pos.y = SCREEN_HEIGHT
 
-    def cast_rays(self, asteroids, target):
-        """
-        Casts rays from the rocket to detect objects, accounting for screen wrap-around.
-        """
-        self.raycast_results_for_drawing.clear()
-        ray_outputs = []
 
-        # --- NEW: Define offsets for the 8 ghost worlds around the main one ---
-        world_offsets = [
-            (0, 0),  # The real world
-            (SCREEN_WIDTH, 0), (SCREEN_WIDTH, SCREEN_HEIGHT), (0, SCREEN_HEIGHT),
-            (-SCREEN_WIDTH, SCREEN_HEIGHT), (-SCREEN_WIDTH, 0), (-SCREEN_WIDTH, -SCREEN_HEIGHT),
-            (0, -SCREEN_HEIGHT), (SCREEN_WIDTH, -SCREEN_HEIGHT)
-        ]
-
-        start_angle = self.angle - FOV / 2
-
-        for i in range(RAY_COUNT):
-            ray_angle_deg = start_angle + i * FOV / (RAY_COUNT - 1)
-            ray_angle_rad = math.radians(ray_angle_deg)
-            ray_dir = pygame.math.Vector2(math.cos(ray_angle_rad), -math.sin(ray_angle_rad))
-            
-            closest_hit_dist = RAY_LENGTH
-            hit_type = TYPE_EMPTY
-            hit_color = WHITE
-
-            collidables = [(a.pos, a.radius, TYPE_ASTEROID, RED) for a in asteroids]
-            collidables.append((target.pos, target.radius, TYPE_TARGET, GREEN))
-
-            # --- MODIFIED COLLISION CHECK ---
-            for c_pos, c_radius, c_type, c_color in collidables:
-                # Check the object in the real world and all 8 ghost worlds
-                for offset_x, offset_y in world_offsets:
-                    ghost_pos = c_pos + pygame.math.Vector2(offset_x, offset_y)
-                    
-                    # Simple line-circle intersection check
-                    for step in range(0, int(RAY_LENGTH), 5):
-                        point_on_ray = self.pos + ray_dir * step
-                        if point_on_ray.distance_to(ghost_pos) < c_radius:
-                            if step < closest_hit_dist:
-                                closest_hit_dist = step
-                                hit_type = c_type
-                                hit_color = c_color
-                            # Found the closest hit for this ray, break inner loops
-                            break 
-                    # If we found a hit, we don't need to check other ghost positions for this object
-                    if closest_hit_dist < RAY_LENGTH and hit_type == c_type:
-                        break
-            
-            normalized_dist = closest_hit_dist / RAY_LENGTH
-            ray_outputs.extend([normalized_dist, float(hit_type)])
-            
-            end_pos = self.pos + ray_dir * closest_hit_dist
-            self.raycast_results_for_drawing.append((self.pos, end_pos, hit_color))
-
-        return ray_outputs
+    
     def explode(self):
         if self.is_exploding: return
         self.is_exploding = True
@@ -302,12 +245,13 @@ class RocketEnv:
             print("Error loading images! Make sure 'ship.png' and 'asteroid.png' are in an 'image' folder.")
             pygame.quit()
             exit()
-        
-        # Action space: 0: None, 1: Thrust, 2: Turn Left, 3: Turn Right
         self.action_space_n = 4
 
-        # Observation space: vel.x, vel.y, angle(cos), angle(sin), angle_vel + (dist, type) for each ray
-        self.observation_space_shape = (2 + 2 + 1 + RAY_COUNT * 2,)
+
+        n_ship_state = 7
+        n_target_state = 2
+        n_asteroid_state = ASTEROID_COUNT * 4
+        self.observation_space_shape = (n_ship_state + n_target_state + n_asteroid_state,)
 
     def reset(self):
         """Resets the environment for a new episode."""
@@ -322,73 +266,94 @@ class RocketEnv:
         return self._get_observation()
 
     def _get_observation(self):
-        """
-        Constructs the observation vector for the agent.
-        State = [vx, vy, cos(angle), sin(angle), angle_vel, ray1_dist, ray1_type, ray2_dist, ray2_type, ...]
-        """
-        # Rocket's own state
-        angle_rad = math.radians(self.player.angle)
-        rocket_state = [
-            self.player.vel.x / 10.0,  # Normalize velocity
-            self.player.vel.y / 10.0,
-            math.cos(angle_rad),
-            -math.sin(angle_rad), # Use -sin to match pygame's coordinate system
-            self.player.angle_vel / ROTATION_SPEED, # Normalize angular velocity
-        ]
+            """
+            Constructs the observation vector for the agent with global coordinates.
+            All values are normalized to be roughly between -1 and 1.
+            """
+            state = []
 
-        # Environmental state from raycasting
-        ray_state = self.player.cast_rays(self.asteroids, self.target)
+            # --- 1. Ship's own state (normalized) ---
+            angle_rad = math.radians(self.player.angle)
+            state.extend([
+                self.player.pos.x / SCREEN_WIDTH,
+                self.player.pos.y / SCREEN_HEIGHT,
+                self.player.vel.x / 10.0,  # Normalize velocity by a reasonable max
+                self.player.vel.y / 10.0,
+                math.cos(angle_rad),
+                -math.sin(angle_rad),
+                self.player.angle_vel/100 #normalize
+            ])
 
-        # Combine and return as a numpy array
-        return np.array(rocket_state + ray_state, dtype=np.float32)
+            # --- 2. Target's state (normalized) ---
+            state.extend([
+                self.target.pos.x / SCREEN_WIDTH,
+                self.target.pos.y / SCREEN_HEIGHT,
+            ])
 
-def step(self, action):
-    self.steps += 1
-    reward = 0
-    done = False
-    info = {}
-    self.player.perform_action(action)
-    self.player.update()
-    for asteroid in self.asteroids: asteroid.update()
-
-    # --- REWARD SHAPING ---
-    # 1. Time penalty (encourages speed)
-    reward -= 0.02 # Increased penalty
-
-    # 2. Distance-based reward
-    new_dist = self.player.pos.distance_to(self.target.pos)
-    reward += (self.distance_to_target - new_dist) * 0.05
-    self.distance_to_target = new_dist
-
-    # --- 3. NEW: Reward for pointing towards the target ---
-    vec_to_target = (self.target.pos - self.player.pos).normalize()
-    rocket_forward_vec = pygame.math.Vector2(math.cos(math.radians(self.player.angle)), -math.sin(math.radians(self.player.angle))).normalize()
-    # Dot product gives cos(angle). 1.0 is perfect alignment, -1.0 is opposite.
-    alignment_reward = rocket_forward_vec.dot(vec_to_target)
-    reward += alignment_reward * 0.03 # Small bonus for good alignment
-
-    # --- Event-based rewards (large one-time rewards/penalties) ---
-    if self.distance_to_target < self.player.radius + self.target.radius:
-        reward += 100
-        self.score += 1
-        self.target.spawn()
-        self.distance_to_target = self.player.pos.distance_to(self.target.pos)
-        info['target_collected'] = True
-
-    for asteroid in self.asteroids:
-        if self.player.pos.distance_to(asteroid.pos) < self.player.radius + asteroid.radius:
-            reward -= 100
-            self.player.explode()
-            done = True
-            info['crashed'] = True
-            break
+            # --- 3. Asteroids' state (normalized) ---
+            for asteroid in self.asteroids:
+                state.extend([
+                    asteroid.pos.x / SCREEN_WIDTH,
+                    asteroid.pos.y / SCREEN_HEIGHT,
+                    asteroid.vel.x / 4.0, # Asteroids are slower, normalize by smaller max
+                    asteroid.vel.y / 4.0,
+                ])
             
-    if self.steps >= self.max_steps:
-        done = True
-        info['timeout'] = True
+            
+            return np.array(state, dtype=np.float32)
+    def step(self, action):
+        self.steps += 1
+        reward = 0
+        done = False
+        info = {}
+        self.player.perform_action(action)
+        self.player.update()
+        for asteroid in self.asteroids: asteroid.update()
 
-    observation = self._get_observation()
-    return observation, reward, done, info
+        # 1. Time penalty (encourages speed)
+        reward -= 0.01 # Small penalty for every step taken.
+
+        # 2. Distance-based reward (Simplified and more effective)
+        new_dist = self.player.pos.distance_to(self.target.pos)
+        # Reward is the amount of progress made toward the target.
+        reward += (self.distance_to_target - new_dist) * 0.1 # Increased incentive
+        distance_bonus = 5.0 / (new_dist + 1.0)
+        reward += distance_bonus 
+        self.distance_to_target = new_dist
+
+        speed = self.player.vel.length()
+        if speed < 0.1 and action == 0: # Si l'agent choisit de ne rien faire et qu'il est lent
+            reward -= 0.1 # Grosse pénalité pour l'inactivité
+
+        # --- 3. RE-ENABLE ALIGNMENT REWARD ---
+        #vec_to_target = (self.target.pos - self.player.pos).normalize()
+        # Use the same physics as the thruster for the forward vector
+        #rocket_forward_vec = pygame.math.Vector2(math.sin(math.radians(self.player.angle)), -math.cos(math.radians(self.player.angle)))
+        #alignment_reward = rocket_forward_vec.dot(vec_to_target)
+        #reward += alignment_reward * 0.02 # Give a small, continuous reward for pointing correctly
+
+        # --- Event-based rewards (large one-time rewards/penalties) ---
+        if self.distance_to_target < self.player.radius + self.target.radius:
+            reward += 100
+            self.score += 1
+            self.target.spawn()
+            self.distance_to_target = self.player.pos.distance_to(self.target.pos)
+            info['target_collected'] = True
+
+        for asteroid in self.asteroids:
+            if self.player.pos.distance_to(asteroid.pos) < self.player.radius + asteroid.radius:
+                reward -= 100
+                self.player.explode()
+                done = True
+                info['crashed'] = True
+                break
+                
+        if self.steps >= self.max_steps:
+            done = True
+            info['timeout'] = True
+
+        observation = self._get_observation()
+        return observation, reward, done, info
     def render(self):
         """Draws the environment to the screen."""
         if self.screen is None:
@@ -457,14 +422,14 @@ class QNetwork(nn.Module):
 class DQNAgent:
     def __init__(self, env):
         # Hyperparameters
-        self.BATCH_SIZE = 16
-        self.GAMMA = 0.99
+        self.BATCH_SIZE = 256
+        self.GAMMA = 0.95
         self.EPS_START = 0.9
         self.EPS_END = 0.05
-        self.EPS_DECAY = 750
-        self.TAU = 0.005 # Target network update rate
-        self.LR = 1e-4 # Learning rate
-        self.REPLAY_BUFFER_SIZE = 50000 # Store more diverse experiences.
+        self.EPS_DECAY = 1000
+        self.TAU = 0.01 # Target network update rate
+        self.LR = 3e-4 # Learning rate
+        self.REPLAY_BUFFER_SIZE = 20000 # Store more diverse experiences.
         self.LEARNING_UPDATES_PER_STEP = 2 # Perform multiple learning steps for each action taken.
 
         self.replay_buffer = ReplayBuffer(self.REPLAY_BUFFER_SIZE)
@@ -486,7 +451,7 @@ class DQNAgent:
         eps_threshold = self.EPS_END + (self.EPS_START - self.EPS_END) * \
             math.exp(-1. * self.steps_done / self.EPS_DECAY)
         self.steps_done += 1
-
+     
         if random.random() > eps_threshold:
             # Exploit: choose the best action from the policy network
             with torch.no_grad():
@@ -558,6 +523,11 @@ if __name__ == "__main__":
     env = RocketEnv()
     agent = DQNAgent(env)
 
+        # --- AJOUT : Suivi des performances pour l'exploration intelligente ---
+    scores_deque = deque(maxlen=100) # Stocke les 100 derniers scores
+    best_avg_score = -np.inf # Garde en mémoire le meilleur score moyen
+    episodes_since_improvement = 0
+
    # --- Load the model ---
     if os.path.exists(MODEL_PATH):
         print(f"Loading model from {MODEL_PATH}...")
@@ -582,17 +552,20 @@ if __name__ == "__main__":
         agent.policy_net.eval()
         num_episodes = 20 # Run for 20 episodes to watch
         render_every = 1  # Render every episode
+        save_every = 1000
     else:
         # In training mode
         agent.policy_net.train()
-        num_episodes = 2000
-        render_every = 1
+        num_episodes = 10000
+        render_every = 10
+        save_every = 25
 
     for i_episode in range(num_episodes):
         state = env.reset()
         state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         total_reward = 0
         should_render = (i_episode + 1) % render_every == 0
+        should_save = (i_episode + 1) % save_every == 0
 
         while True:
             # In eval mode, disable exploration by setting a high threshold
@@ -602,6 +575,7 @@ if __name__ == "__main__":
                      action = torch.argmax(action_values).view(1, 1)
             else:
                 action = agent.choose_action(state)
+               
 
             observation, reward, done, info = env.step(action.item())
             total_reward += reward
@@ -615,12 +589,10 @@ if __name__ == "__main__":
                     next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
                 
                 agent.replay_buffer.push(state, action, next_state, reward_tensor)
-                state = next_state
-                # --- NEW: Loop to learn multiple times per step ---
                 if len(agent.replay_buffer) > agent.BATCH_SIZE:
                     for _ in range(agent.LEARNING_UPDATES_PER_STEP):
                         agent.learn()
-
+                
                 # Soft update of the target network's weights
                 agent.update_target_net()
             else: # In eval mode, just update the state
@@ -634,17 +606,43 @@ if __name__ == "__main__":
                     if event.type == pygame.QUIT:
                         env.close()
                         exit()
-                torch.save({
-            'policy_net_state_dict': agent.policy_net.state_dict(),
-            'target_net_state_dict': agent.target_net.state_dict(),
-            'optimizer_state_dict': agent.optimizer.state_dict(),
-            'steps_done': agent.steps_done,
-        }, MODEL_PATH)
+
             
             if done:
                 print(f"Episode {i_episode+1} | Score: {env.score} | Total Reward: {total_reward:.2f}")
                 if should_render:
                     pygame.time.wait(1000) 
+
+
+
+                 # --- AJOUT : Logique de l'exploration intelligente ---
+                scores_deque.append(env.score)
+                current_avg_score = np.mean(scores_deque)
+
+                if len(scores_deque) == 100: # Attendre d'avoir assez de données
+                    if current_avg_score > best_avg_score:
+                        best_avg_score = current_avg_score
+                        episodes_since_improvement = 0
+                        print(f"!!! Nouveau meilleur score moyen : {best_avg_score:.2f} !!!")
+                    else:
+                        episodes_since_improvement += 1
+
+                # Si l'agent ne s'améliore pas depuis 200 épisodes, il est bloqué.
+                if episodes_since_improvement > 200:
+                    print("--- L'AGENT EST BLOQUÉ ! RÉINITIALISATION DE L'EXPLORATION. ---")
+                    # On réinitialise sa curiosité pour le forcer à essayer de nouvelles choses
+                    agent.steps_done = 0 
+                    episodes_since_improvement = 0
+                    best_avg_score = -np.inf # On réinitialise aussi le score de référence
+
+                if should_save and not EVALUATION_MODE:
+                    print(f"--- Saving checkpoint at episode {i_episode+1} ---")
+                    torch.save({
+                        'policy_net_state_dict': agent.policy_net.state_dict(),
+                        'target_net_state_dict': agent.target_net.state_dict(),
+                        'optimizer_state_dict': agent.optimizer.state_dict(),
+                        'steps_done': agent.steps_done,
+                    }, MODEL_PATH)
                 break
 
     # Only save if we were training
